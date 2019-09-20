@@ -1,0 +1,1 @@
+'authBot' is the exported contact flow for the authentication bot. You should be able to just import this file into your Connect workspace.
