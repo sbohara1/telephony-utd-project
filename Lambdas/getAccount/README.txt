@@ -1,0 +1,1 @@
+getAccount is the Lambda function used for input validation and fulfillment for the authentication bot.
