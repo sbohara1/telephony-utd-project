@@ -1,1 +1,0 @@
-This is the exported authentication bot in JSON format. You should be able to import this into your Lex workspace.
