@@ -1,13 +1,12 @@
 import json
 import logging
+import boto3
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
 def lambda_handler(event, context):
     return dispatch(event)
-
-
 
 """ --- Helpers to build responses which match the structure of the necessary dialog actions --- """
 
@@ -58,87 +57,175 @@ def delegate(session_attributes, slots):
     
 """ For Intents """
 
-def authenticateDOB(event):
-    logger.debug(json.dumps(event)) 
-   
-    source = event['invocationSource']
+def fulfill(event): # All three slots should be valid - matching to an account - and now the user has been validated.
+    return close(event['sessionAttributes'], 'Fulfilled', 'Thanks.')
     
+def goodDOB(event):
+    slots = get_slots(event)
+    DOB = slots['DOB']
+    if (DOB == None): # If the slot isn't filled it obviously can't be good.
+        return False
+    else:
+        bucket = 'connect-499d41f81250'
+    key = 'telephony/accounts.json'
+    
+    s3 = boto3.client('s3')
+    try:
+        data = s3.select_object_content(
+            Bucket = bucket, 
+            Key = key,
+            ExpressionType = "SQL",
+            Expression = "Select * from s3object s where s.accountNumber = {}".format(slots['accountNumber']),
+            InputSerialization = {"JSON": {"Type": "document"}},
+            OutputSerialization = {"JSON": {}})
+        for event in data['Payload']:
+            if 'Records' in event:
+                account = event['Records']['Payload'].decode('utf-8')
+                account = json.loads(account)
+                if (str(account['DOB']) == str(slots['DOB'])):
+                    return True
+        return False
+            
+    except Exception as e:
+        print (e)
+        raise e
+
+def authenticateDOB(event):
+    source = event['invocationSource']
     if source == 'DialogCodeHook':
         slots = get_slots(event)
-        if (event['currentIntent']['slots']['DOB'] != None):
-            DOB = slots['DOB']
-            parts = DOB.split('-')
-            year = DOB[0]
-            month = DOB[1]
-            day = DOB[2]
-            msg = "Your birthday is {} {} {}".format(month, day, year)
-            return close(event['sessionAttributes'], 'Fulfilled', msg)
+        if (slots['DOB'] != None): 
+            if not (goodDOB(event)): # Checks if the DOB given matches the account's DOB.
+                return elicit_slot(event['sessionAttributes'], 
+                            event['currentIntent']['name'],
+                            slots,
+                            "DOB",
+                            "Sorry, that date of birth did not match our records. Please give me your date of birth.") 
+            else:
+                return fulfill(event) # Good DOB means the user has provided all three requirements and has been validated.
         else:
-            return close(event['sessionAttributes'], 'Fulfilled', msg)
-    else:
-        DOB = event['currentIntent']['slots']['DOB']
-        parts = DOB.split('-')
-        year = parts[0]
-        month = parts[1]
-        day = parts[2]
-        return close(event['sessionAttributes'], 'Fulfilled', "Your birthday is {} {} {}".format(month, day, year))
+            return delegate(event['sessionAttributes'], slots) # If the slot isn't filled, let Lex prompt for it.
             
             
 
 def authenticateSSN(event):
-    logger.debug(json.dumps(event)) 
-   
     source = event['invocationSource']
-    print('authenticating')
     if source == 'DialogCodeHook':
         slots = get_slots(event)
-        if (len(str(event['currentIntent']['slots']['SSN'])) != 9 and event['currentIntent']['slots']['SSN'] != None):
-            return elicit_slot(event['sessionAttributes'], 
-                        event['currentIntent']['name'],
-                        slots,
-                        "SSN",
-                        "Sorry, that was not valid. Please enter your 9 digit Social Security Number used to open this account.")
-        else:
-            return delegate(event['sessionAttributes'], slots)
+        if (slots['SSN'] != None): # Slot is filled so we check if it's 9-digits long and if the SSN matches the account number's SSN.
+            if (len(str(slots['SSN'])) != 9):
+                return elicit_slot(event['sessionAttributes'], 
+                            event['currentIntent']['name'],
+                            slots,
+                            "SSN",
+                            "I'm sorry, that was not a 9-digit number. Please give me your 9-digit Social Security Number used to open this account.")
+            if not goodSSN(event): 
+                return elicit_slot(event['sessionAttributes'], 
+                            event['currentIntent']['name'],
+                            slots,
+                            "SSN",
+                            "Sorry, that did not match our records. Please give me your 9-digit Social Security Number used to open this account.")
+            return delegate(event['sessionAttributes'], slots) # If the SSN is good, let Lex prompt for the next slot - DOB.
+        return delegate(event['sessionAttributes'], slots) #If our slot isn't filled, let Lex prompt for SSN.
 
 def authenticateAccountNumber(event):
-    logger.debug(json.dumps(event)) 
-   
     source = event['invocationSource']
-    
     if source == 'DialogCodeHook':
         slots = get_slots(event)
-        # if (event['currentIntent']['slots']['SSN'] != None):
-        #     return authenticateSSN(event)
-        if (event['currentIntent']['slots']['accountNumber'] != None):
+        if (event['currentIntent']['slots']['accountNumber'] != None): # This branch is taken once actual input for the accountNumber slot has been given.
             accountNum = event['currentIntent']['slots']['accountNumber']
             # Input validation for the account number.
-            if (len(str(accountNum)) != 13):
+            if (len(str(accountNum)) != 13):                # If the length of the account number that was given is not 13, elicit for the accountNumber slot again.
                 return elicit_slot(event['sessionAttributes'], 
                         event['currentIntent']['name'],
                         slots,
                         "accountNumber",
-                        "I'm sorry, that was not valid. Please enter your 13 digit account number. This number appears at the top of your statement.")
-            else:
-                return delegate(event['sessionAttributes'], slots) # If the input is valid, begin to elicit for the user's SSN. Delegate will let the Lex bot prompt for the next slot.
+                        "I'm sorry, that was not a 13-digit number. Please give me your 13 digit account number. This number appears at the top of your statement.")
+            if not (goodAccountNum(accountNum)): # Checking the hardcoded accounts for the 13-digit number entered.
+                return elicit_slot(event['sessionAttributes'], 
+                        event['currentIntent']['name'],
+                        slots,
+                        "accountNumber",
+                        "I'm sorry, that account number was not found in our system. Please give me your 13 digit account number.")
+            
+            return delegate(event['sessionAttributes'], slots) # If the input is valid, begin to elicit for the user's SSN. Delegate will let the Lex bot prompt for the next slot.
         else:
-                return delegate(event['sessionAttributes'], slots) # If the slot hasn't been filled, let Lex prompt for the slot.
-                
-def dispatch(event):
-    intent_name = event['currentIntent']['name']
-    slots = get_slots(event)
-    if (intent_name == 'account'):
-        source = event['invocationSource']
-        if source == "FulfillmentCodeHook":
-            return authenticateDOB(event)
-        if(slots['accountNumber'] == None or (len(str(event['currentIntent']['slots']['accountNumber'])) != 13)):
-            return authenticateAccountNumber(event)
-        if(event['currentIntent']['slots']['SSN'] == None or len(str(event['currentIntent']['slots']['accountNumber'] != 9))):
-            return authenticateSSN(event)
-        if(event['currentIntent']['slots']['DOB'] == None):
-            return authenticateDOB(event)
-        
-    
+            return delegate(event['sessionAttributes'], slots) # If the slot hasn't been filled, let Lex prompt for the slot.
 
+def goodAccountNum(acc):
+    bucket = 'connect-499d41f81250'
+    key = 'telephony/accounts.json'
     
-    raise Exception('Intent ' + intent_name + ' not supported.')
+    s3 = boto3.client('s3')
+    try:
+        data = s3.select_object_content(
+            Bucket = bucket, 
+            Key = key,
+            ExpressionType = "SQL",
+            Expression = "Select * from s3object s where s.accountNumber = {}".format(acc),
+            InputSerialization = {"JSON": {"Type": "document"}},
+            OutputSerialization = {"JSON": {}})
+        for event in data['Payload']:
+            if 'Records' in event:
+                records = event['Records']['Payload'].decode('utf-8')
+                return True
+        return False
+            
+    except Exception as e:
+        print (e)
+        raise e
+
+def goodSSN(event): # This function checks if the SSN is matching with the account number's SSN.
+    slots = get_slots(event)
+    bucket = 'connect-499d41f81250'
+    key = 'telephony/accounts.json'
+    
+    s3 = boto3.client('s3')
+    try:
+        data = s3.select_object_content(
+            Bucket = bucket, 
+            Key = key,
+            ExpressionType = "SQL",
+            Expression = "Select * from s3object s where s.accountNumber = {}".format(slots['accountNumber']),
+            InputSerialization = {"JSON": {"Type": "document"}},
+            OutputSerialization = {"JSON": {}})
+        for event in data['Payload']:
+            if 'Records' in event:
+                account = event['Records']['Payload'].decode('utf-8')
+                account = json.loads(account)
+                if (str(account['SSN']) == str(slots['SSN'])):
+                    return True
+        return False
+            
+    except Exception as e:
+        print (e)
+        raise e
+
+def dispatch(event):
+    logger.debug(json.dumps(event))
+    slots = get_slots(event)
+    source = event['invocationSource']
+    if (source == 'DialogCodeHook'):
+        if (slots['accountNumber'] == None): # If our slots are NOT filled, we will delegate so that Lex can prompt the user. 
+            return delegate(event['sessionAttributes'], slots) 
+        if not (goodAccountNum(slots['accountNumber'])): # If our slot IS filled, we authenticate the input until it is good by checking for a match via the account number.
+            return authenticateAccountNumber(event)
+            
+        event['sessionAttributes'] = { 
+            "accountNumber" : slots['accountNumber']
+            } # This sets our session attribute for the account number.
+            
+        if (slots['SSN'] == None): # These next two blocks are the same as the first just specialized to deal with the SSN and DOB input.
+            return delegate(event['sessionAttributes'], slots) 
+        if not (goodSSN(event)):
+            return authenticateSSN(event)
+            
+        if (slots['DOB'] == None): 
+            return delegate(event['sessionAttributes'], slots) 
+        if not (goodDOB(event)):
+            return authenticateDOB(event)
+        return fulfill(event)
+    else:
+        return fulfill(event)
+            
+            
